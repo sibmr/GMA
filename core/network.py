@@ -40,6 +40,9 @@ class RAFTGMA(nn.Module):
         self.fnet = BasicEncoder(output_dim=256, norm_fn='instance', dropout=args.dropout)
         self.cnet = BasicEncoder(output_dim=hdim + cdim, norm_fn='batch', dropout=args.dropout)
         self.update_block = GMAUpdateBlock(self.args, hidden_dim=hdim)
+        
+        # additional attention network
+        # max_pos_size = 160 limits the model to images of maximum size (160*8,160*8) = (1280,1280)
         self.att = Attention(args=self.args, dim=cdim, heads=self.args.num_heads, max_pos_size=160, dim_head=cdim)
 
     def freeze_bn(self):
@@ -87,19 +90,25 @@ class RAFTGMA(nn.Module):
 
         fmap1 = fmap1.float()
         fmap2 = fmap2.float()
+
+        # calculate 4d correlation volume
         corr_fn = CorrBlock(fmap1, fmap2, radius=self.args.corr_radius)
 
-        # run the context network
+        # run the context network and compute cost volume attention
         with autocast(enabled=self.args.mixed_precision):
+            # the context network produces the initial hidden state (net) and the context features (inp)
             cnet = self.cnet(image1)
             net, inp = torch.split(cnet, [hdim, cdim], dim=1)
             net = torch.tanh(net)
             inp = torch.relu(inp)
+            # query and key features calculated by attention network from context features
             # attention, att_c, att_p = self.att(inp)
             attention = self.att(inp)
 
+        # coords0, coords1: each pixel initialized with pixel index
         coords0, coords1 = self.initialize_flow(image1)
 
+        # add initial flow to coords1 (the corresponding pixel of coords0)
         if flow_init is not None:
             coords1 = coords1 + flow_init
 

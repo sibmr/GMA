@@ -111,6 +111,12 @@ class BasicUpdateBlock(nn.Module):
 
 class GMAUpdateBlock(nn.Module):
     def __init__(self, args, hidden_dim=128):
+        """ Hidden state update for GMA
+
+        Args:
+            args (object): object holding all model settings
+            hidden_dim (int, optional): size of the hidden state for each pixel. Defaults to 128.
+        """
         super().__init__()
         self.args = args
         self.encoder = BasicMotionEncoder(args)
@@ -125,8 +131,27 @@ class GMAUpdateBlock(nn.Module):
         self.aggregator = Aggregate(args=self.args, dim=128, dim_head=128, heads=self.args.num_heads)
 
     def forward(self, net, inp, corr, flow, attention):
+        """ update the hidden state for each pixel (in the downsampled image)
+
+        Args:
+            net (torch.Tensor): hidden state before update, shape: (batch, hidden_dim, h1, w1)
+            inp (torch.Tensor): context features, shape: (batch, context_dim, h1, w1)
+            corr (torch.Tensor): indexed correlation volume, shape:  (batch, num_levels*dim*(2*r+1)*(2*r+1), h1, w1)
+            flow (torch.Tensor): current flow estimation of shape: (batch, 2, h1, w1)
+            attention (torch.Tensor): attention over all motion features 
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: new hidden state, upsampling mask, new flow estimate
+        """
+
+        # calculate motion features
+        # shape: (batch, 128, ht, wd)
         motion_features = self.encoder(flow, corr)
+        
+        # apply attention to motion features
         motion_features_global = self.aggregator(attention, motion_features)
+        
+        # concatenate context, motion and aggregated motion features
         inp_cat = torch.cat([inp, motion_features, motion_features_global], dim=1)
 
         # Attentional update
