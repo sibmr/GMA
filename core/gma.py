@@ -9,7 +9,8 @@ class RelPosEmb(nn.Module):
             max_pos_size,
             dim_head
     ):
-        """ 
+        """ Initializes the relative positional embedding module
+            Initialize relative height and width embedding and relative indices into the embeddings
 
         Args:
             max_pos_size (int): "radius" of the embedding in the p_infinity norm
@@ -21,8 +22,9 @@ class RelPosEmb(nn.Module):
         self.rel_height = nn.Embedding(2 * max_pos_size - 1, dim_head)
         self.rel_width = nn.Embedding(2 * max_pos_size - 1, dim_head)
 
+        # maps two pixel indices in one dimension to their displacement
         # 2d tensor of shape (max_pos_size, max_pos_size) where t[i,j] = j-i
-        # intuition: t[pixel_index_img1, corresponding_index_img2] = corresponding_index_img2 - pixel_index_img1
+        # intuition: t[pixel_index_img1, corresponding_index_img1] = corresponding_index_img1 - pixel_index_img1
         # example for (max_pos_size=4):
         # tensor(  [[ 0,  1,  2,  3],
         #           [-1,  0,  1,  2],
@@ -31,6 +33,7 @@ class RelPosEmb(nn.Module):
         deltas = torch.arange(max_pos_size).view(1, -1) - torch.arange(max_pos_size).view(-1, 1)
         
         # move value range from [-max_pos_size-1..max_pos_size-1] -> [0..2*max_pos_size-2]
+        # this is done because the indices of the embeddings start at zero
         rel_ind = deltas + max_pos_size - 1
         
         # TODO: why add this as buffer? (tensor becomes part of state dict of model)
@@ -39,19 +42,22 @@ class RelPosEmb(nn.Module):
         self.register_buffer('rel_ind', rel_ind)
 
     def forward(self, q):
-        """
+        """ Given two pixels (x,y) and (u,v) in image1:
+            Displacement (dx,dy) := (rel_ind(u), rel_ind(v)) = (u-x, v-y)
+            Compute similarity between the query features at (x,y) and 
+            the relative height/width embedding for (dx, dy)
 
         Args:
             q (torch.Tensor): query vectors for each pixel of shape (batch, heads, ht, wd, context_channels)
 
         Returns:
-            torch.Tensor: similarity score for each pixel
+            torch.Tensor: similarity score for each pair of pixels (x,y), (u,v) in image1
         """
         batch, heads, h, w, c = q.shape
 
         # query height/width embedding for each pair:
-        #       (index_img1.x, corresponding_index_img2.x)
-        #   OR: (index_img1.y, corresponding_index_img2.y)
+        #       (index_img1.x, corresponding_index_img1.x)
+        #   OR: (index_img1.y, corresponding_index_img1.y)
         # shape: (ht*ht, dim_head)
         height_emb = self.rel_height(self.rel_ind[:h, :h].reshape(-1))
         # shape: (wd*wd, dim_head)
@@ -62,11 +68,13 @@ class RelPosEmb(nn.Module):
         # shape: (wd*wd, dim_head) -> (wd, 1, wd, dim_head)
         width_emb = rearrange(width_emb, '(y v) d -> y () v d', y=w)
 
+        # compute similarity between query features at pixel (x,y) in image1 and
+        # displacement embedding features for (dx,dy) = (u-x, v-y) 
         # height_score[batch, head, x, y, u, v] 
         #   = query[batch, head, x, y].T @ h_emb[x,u,v(=0)]
         height_score = einsum('b h x y d, x u v d -> b h x y u v', q, height_emb)
         # width_score[batch, head, x, y, u, v] 
-        #   = query[batch, head, x, y].T @ h_emb[y,u(=0),v]
+        #   = query[batch, head, x, y].T @ w_emb[y,u(=0),v]
         width_score = einsum('b h x y d, y u v d -> b h x y u v', q, width_emb)
 
         # add similarity scores for height and width to get overall similarity
@@ -127,7 +135,7 @@ class Attention(nn.Module):
         if self.args.position_only:
             sim = self.pos_emb(q)
 
-        # compute query-position and query-key similarity
+        # compute query-rel_position and query-key similarity
         # add both similarity scores
         elif self.args.position_and_content:
             # query_key_similarity[batch, head, x, y, u, v]
